@@ -4,8 +4,11 @@ Core functions come from uncommented notebook cells. Only file handling,
 per-session ownership, API-key injection and UI result extraction are adapters.
 """
 import json
+import gc
+import logging
 import tempfile
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
@@ -23,6 +26,8 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 load_dotenv(Path(__file__).with_name(".env"))
+_conversion_lock = Lock()
+logger = logging.getLogger(__name__)
 
 headers_to_split_on = [
     ("#", "Header 1"),
@@ -123,23 +128,76 @@ class ExamAgent:
         return result["messages"][-1].content, sources
 
 
-def process_uploaded_pdf(file_bytes, filename="document.pdf", api_key=None):
-    """Replace the notebook's fixed PDF path with a temporary uploaded PDF."""
-    from docling.document_converter import DocumentConverter
+def convert_pdf_to_markdown(file_bytes, low_memory=False):
+    """Run Docling once at a time to avoid overlapping model allocations."""
+    with _conversion_lock:
+        try:
+            return _convert_pdf_to_markdown(file_bytes, low_memory)
+        finally:
+            # Release converter/pipeline cycles before chat loads its reranker.
+            gc.collect()
+
+
+def _convert_pdf_to_markdown(file_bytes, low_memory):
+    from docling.document_converter import DocumentConverter, PdfFormatOption
 
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
-        converter = DocumentConverter()
+        if low_memory:
+            from docling.datamodel.base_models import InputFormat
+            from docling.datamodel.accelerator_options import AcceleratorOptions
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+            options = PdfPipelineOptions(
+                do_ocr=False,
+                do_table_structure=True,
+                layout_batch_size=1,
+                table_batch_size=1,
+                ocr_batch_size=1,
+                queue_max_size=2,
+                accelerator_options=AcceleratorOptions(device="cpu", num_threads=1),
+            )
+            converter = DocumentConverter(format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=options)
+            })
+        else:
+            converter = DocumentConverter()
+        logger.warning("PDF conversion starting (low_memory=%s)", low_memory)
         loader = converter.convert(tmp_path)
-        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-        md_header_splits = markdown_splitter.split_text(loader.document.export_to_markdown())
+        markdown = loader.document.export_to_markdown()
+        logger.warning("PDF conversion finished (%s characters)", len(markdown))
+        return markdown
     finally:
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
 
+
+def process_uploaded_markdown(file_bytes, filename="document.md", api_key=None):
+    """Accept locally exported Docling Markdown without loading PDF models."""
+    try:
+        markdown = file_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Please upload a Markdown file saved as UTF-8.") from exc
+    return _agent_from_markdown(markdown, filename, api_key)
+
+
+def _agent_from_markdown(markdown, filename, api_key):
+    if not markdown.strip():
+        raise ValueError("No readable text was found. For a scanned PDF, turn off lower-memory mode "
+                         "or convert it locally and upload the exported Markdown.")
+    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+    md_header_splits = markdown_splitter.split_text(markdown)
+    if not md_header_splits:
+        raise ValueError("No searchable sections were found in this document.")
     llm = ChatOpenAI(model='gpt-4o-mini', api_key=api_key)
     chatbot = build_chatbot(md_header_splits, llm, api_key=api_key)
     return ExamAgent(chatbot, filename, len(md_header_splits))
+
+
+def process_uploaded_pdf(file_bytes, filename="document.pdf", api_key=None, *, low_memory=False):
+    """Default to the notebook converter; optionally reduce PDF model memory."""
+    markdown = convert_pdf_to_markdown(file_bytes, low_memory=low_memory)
+    return _agent_from_markdown(markdown, filename, api_key)

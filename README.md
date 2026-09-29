@@ -44,3 +44,29 @@ The first retrieval may download local parsing/reranking models. Internet access
 and an OpenAI key with available quota are required. Document text is sent to
 OpenAI for embeddings and answers; API charges apply. Excerpts identify sections,
 not PDF page numbers.
+
+## PDF processing on hosts with limited memory
+
+The UI defaults to **Lower-memory PDF processing**: OCR is disabled, stage batches
+are reduced to one, queues are bounded, and CPU inference uses one thread. Table
+structure extraction stays enabled. This is intended for PDFs with selectable text;
+scanned pages and text inside images will not be read. Turn it off to use the
+notebook's default Docling conversion. Header splitting and retrieval are unchanged.
+PDF conversions are serialized within the server process to avoid loading multiple
+sets of models concurrently. Even this mode may exceed a free host's memory limit.
+
+If the app terminates during model loading, convert the PDF on your local machine:
+
+```powershell
+.\.venv\Scripts\python.exe export_pdf.py noti_cds.pdf
+```
+
+Upload the resulting `noti_cds.md` to the hosted app. The export uses Docling's
+original defaults and Markdown export, preserving the notebook's input to
+MarkdownHeaderTextSplitter, including extracted tables. The hosted Markdown path
+does not load Docling's PDF models. It still runs embeddings, FAISS and FlashRank
+when the agent calls its retrieval tool, so hosting capacity must still be checked.
+
+An abrupt stop without a traceback during model loading suggests a resource kill,
+but does not prove it. Check hosting resource metrics or platform messages. The
+Hugging Face unauthenticated-download warning alone is not a conversion failure.

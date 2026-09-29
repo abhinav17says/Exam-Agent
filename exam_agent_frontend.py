@@ -23,8 +23,8 @@ def show_error(exc, action):
     if isinstance(exc, ValueError):
         st.error(str(exc))
     else:
-        st.error(f"Couldn't {action}. Check your API key, quota and internet connection, then try again. "
-                 "Technical details are available in the terminal.")
+        st.error(f"Couldn't {action} ({type(exc).__name__}). "
+                 "Check Manage app → Logs on Streamlit Cloud, or your local terminal, for the traceback.")
 
 
 with st.sidebar:
@@ -42,7 +42,12 @@ with st.sidebar:
         st.caption("API key available")
     else:
         st.info("Enter an API key to process a PDF and ask questions.")
-    uploaded = st.file_uploader("Upload an exam notification", type=["pdf"])
+    uploaded = st.file_uploader("Upload an exam notification (PDF or Docling Markdown)", type=["pdf", "md"])
+    low_memory = st.checkbox("Lower-memory PDF processing", value=True,
+                             help="Skips OCR and processes smaller batches while retaining table parsing. "
+                                  "Use for PDFs with selectable text. Turn off for scanned documents.")
+    st.caption("If PDF processing crashes this host, convert the PDF locally with export_pdf.py "
+               "and upload the resulting .md file. This avoids loading PDF models here.")
     sample = Path(__file__).with_name("noti_cds.pdf")
     use_sample = st.checkbox("Use the included CDS notification", disabled=not sample.exists())
     data, filename = None, None
@@ -57,7 +62,10 @@ with st.sidebar:
                  disabled=data is None or not api_key):
         try:
             with st.spinner("Reading the PDF and preparing document sections..."):
-                agent = backend.process_uploaded_pdf(data, filename, api_key)
+                if filename.lower().endswith(".md"):
+                    agent = backend.process_uploaded_markdown(data, filename, api_key)
+                else:
+                    agent = backend.process_uploaded_pdf(data, filename, api_key, low_memory=low_memory)
             st.session_state.agent = agent
             st.session_state.document_id = selected_id
             st.session_state.messages = []
@@ -91,7 +99,7 @@ def render_message(message):
 
 
 if not st.session_state.agent:
-    st.info("Start by uploading a PDF in the sidebar, or choose the included CDS notification, then select Process document.")
+    st.info("Upload a PDF or Docling Markdown file in the sidebar, or choose the included CDS notification, then select Process document.")
 
 suggestion = None
 if not st.session_state.messages:
