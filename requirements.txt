@@ -1,0 +1,13 @@
+﻿streamlit>=1.40,<2
+langchain
+langchain-openai
+langchain-community
+langchain-core
+langchain-classic
+langchain-text-splitters
+langgraph
+python-dotenv
+docling
+flashrank
+faiss-cpu
+pypdf
